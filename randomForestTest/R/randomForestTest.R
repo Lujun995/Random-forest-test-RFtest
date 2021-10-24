@@ -1,6 +1,7 @@
 ###############################################################################
-# 2021/07/21 randomForestTest_parallel_omnibus2_updated9.R
+# 2021/10/24 randomForestTest_parallel_omnibus2_updated17.R
 # Author: Lujun Zhang, Jun Chen
+# Version: 1.0
 ###############################################################################
 require(ranger)
 require(ape)
@@ -166,8 +167,10 @@ randomForestTest <-
     fml = as.formula(paste(response.var, paste(adjust.vars,collapse = "+"), sep = "~"))
     if(prediction.type %in% c('Regression')) {
       model =  lm(formula = fml, data = meta.data)
+      meta.data[, response.var] <- mean(model$model[, response.var]) + residuals(model)
     } else 
-      if(prediction.type %in% 'Classification') {
+      if(prediction.type %in% 'Classification') { 
+	  #for a binary variable, RFtest need to generate comparable randomized samples
         model = glm(formula = fml, data = meta.data, family = "binomial")
       }
   }
@@ -192,7 +195,7 @@ randomForestTest <-
   # }
   # if((method %in% c('omnibus','phylogenetic')) & (is.null(tree))) 
     # stop('Please specify a phylogenetic tree.')
-  if(!probability & test.type != "OOB"){
+  if(!probability & test.type != "OOB" & prediction.type == 'Classification'){
     warning("test.type is set to OOB when probability is FALSE")
     test.type = "OOB"
   }
@@ -209,18 +212,18 @@ randomForestTest <-
 	  cum.mat.pa <- 1*(cum.mat != 0) # cum.mat and cum.mat.pa will also be used to calculate stat.p
     for(i in 1:reps){# take average of reps runs to estimate stat.o
       #weighted
-      data <- data.frame(cum.mat, meta.data[, c(response.var, adjust.vars), drop = FALSE])
+      data <- data.frame(cum.mat, meta.data[, c(response.var), drop = FALSE])
       feature.sel <- colnames(data)
       rf.obj <- ranger(dependent.variable.name = response.var, data = data[, feature.sel, drop = FALSE], 
                        importance = 'none',  probability = probability,
-                       always.split.variables = adjust.vars, status.variable.name = status.var, ...)
+                       status.variable.name = status.var, ...)
       stat.o["weighted"]<-stat.o["weighted"]+calculateError(rf.obj, data, response.var, prediction.type, test.type)$stat
       #unweighted
-      data <- data.frame(cum.mat.pa, meta.data[, c(response.var, adjust.vars), drop = FALSE])
+      data <- data.frame(cum.mat.pa, meta.data[, c(response.var), drop = FALSE])
       feature.sel <- colnames(data)
       rf.obj <- ranger(dependent.variable.name = response.var, data = data[, feature.sel, drop = FALSE], 
                        importance = 'none',  probability = probability,
-                       always.split.variables = adjust.vars, status.variable.name = status.var, ...)
+                       status.variable.name = status.var, ...)
 	    temp<-calculateError(rf.obj, data, response.var, prediction.type, test.type)
       stat.o["unweighted"]<-stat.o["unweighted"]+temp$stat
           
@@ -230,11 +233,11 @@ randomForestTest <-
     stat.o<-0
     names(stat.o)<-"weighted"
     for(i in 1:reps){
-	  data <- data.frame(cum.mat, meta.data[, c(response.var, adjust.vars), drop = FALSE])
+	  data <- data.frame(cum.mat, meta.data[, c(response.var), drop = FALSE])
       feature.sel <- colnames(data)
       rf.obj <- ranger(dependent.variable.name = response.var, data = data[, feature.sel, drop = FALSE], 
                        importance = 'none',  probability = probability,
-                       always.split.variables = adjust.vars, status.variable.name = status.var, ...)
+                       status.variable.name = status.var, ...)
 	  temp<-calculateError(rf.obj, data, response.var, prediction.type, test.type)
 	  stat.o = stat.o+temp$stat
 	  w <- temp$w
@@ -244,11 +247,11 @@ randomForestTest <-
     names(stat.o)<-"unweighted"
     cum.mat.pa <- 1*(cum.mat != 0)
     for(i in 1:reps){
-	  data <- data.frame(cum.mat.pa, meta.data[, c(response.var, adjust.vars), drop = FALSE])
+	  data <- data.frame(cum.mat.pa, meta.data[, c(response.var), drop = FALSE])
       feature.sel <- colnames(data)
       rf.obj <- ranger(dependent.variable.name = response.var, data = data[, feature.sel, drop = FALSE], 
                        importance = 'none',  probability = probability,
-                       always.split.variables = adjust.vars, status.variable.name = status.var, ...)
+                       status.variable.name = status.var, ...)
 	  temp<-calculateError(rf.obj, data, response.var, prediction.type, test.type)
       stat.o = stat.o+temp$stat
       w<-temp$w
@@ -269,31 +272,36 @@ randomForestTest <-
     #once but not just passed via the arguments.
     #check if this is needed:
     #clusterExport(cl, varlist = ls(), envir = environment()) #export all the variables in the function namespace
+    
     stat.p <- parSapply(cl,1:perm.no, function(i) {
       #    if (trace) { #doesn't work in parallel version
-      #      if (i %% 100 == 0) cat('.') 
+      #      if (i %% 100 == 0) cat('.')
       #    }
       # permutate the covariates, simulating the response var
       meta.perm<-meta.data
       if(!is.null(adjust.vars)){
         nr = nrow(meta.data)
-        #meta.perm <- meta.perm[sample.int(nr), ] 
         if(prediction.type %in% c('Regression')) {
-          meta.perm[,response.var] <- 
-            predict(object = model, newdata = meta.perm) + sample(residuals(model)) #fitted values and permutated residuals
+          meta.perm[,response.var] <-
+            mean(meta.data[, response.var]) + sample(residuals(model)) #mean values and permutated residuals
+		  #Actually, covariates have been addressed before stat.o, and this is equivalent to
+		  #meta.perm[,response.var]<-sample(meta.data[, response.var])
         } else if(prediction.type %in% 'Classification'){
           pr <- predict(object = model, newdata = meta.perm , type= "response") #the expected probability for meta.perm
-          temp <- rbinom(n=nr, size = 1, prob = pr)
+          repeat{
+           temp <- rbinom(n=nr, size = 1, prob = pr)
+           if(isTRUE(all.equal(sum(temp),sum(pr)))) break
+          }
           names(temp) <- names(pr)
           temp <- factor(temp, levels = c(0,1)) #make sure 1 will be the second level (success)
-          if(length(levels(meta.data[,response.var])) != length(levels(temp))) 
+          if(length(levels(meta.data[,response.var])) != length(levels(temp)))
             stop("Currently, RFtest only accepts a dichotomous response variable!")
           levels(temp) <- levels(meta.data[,response.var])
           meta.perm[,response.var] <- temp
         }
       } else
         meta.perm[,response.var]<-sample(meta.data[, response.var])
-      
+
       # if (two.stage) { #not currently supported
       #   rf.obj <- ranger(dependent.variable.name = response.var, data = data.perm, importance = 'permutation',  probability = probability,
       #                    always.split.variables = adjust.vars, status.variable.name = status.var, ...)
@@ -305,33 +313,33 @@ randomForestTest <-
         stat.p<-rep(NA,2)
         names(stat.p)<-c("weighted","unweighted")
         #weighted
-        data <- data.frame(cum.mat, meta.perm[, c(response.var, adjust.vars), drop = FALSE])
+        data <- data.frame(cum.mat, meta.perm[, c(response.var), drop = FALSE])
         feature.sel <- colnames(data)
-        rf.obj <- ranger(dependent.variable.name = response.var, data = data[, feature.sel, drop = FALSE], 
+        rf.obj <- ranger(dependent.variable.name = response.var, data = data[, feature.sel, drop = FALSE],
                          importance = 'none',  probability = probability,
-                         always.split.variables = adjust.vars, status.variable.name = status.var, ...)
+                         status.variable.name = status.var, ...)
         stat.p["weighted"]<-calculateError(rf.obj, data, response.var, prediction.type, test.type, w)$stat
         #unweighted
-        data <- data.frame(cum.mat.pa, meta.perm[, c(response.var, adjust.vars), drop = FALSE])
+        data <- data.frame(cum.mat.pa, meta.perm[, c(response.var), drop = FALSE])
         feature.sel <- colnames(data)
-        rf.obj <- ranger(dependent.variable.name = response.var, data = data[, feature.sel, drop = FALSE], 
+        rf.obj <- ranger(dependent.variable.name = response.var, data = data[, feature.sel, drop = FALSE],
                          importance = 'none',  probability = probability,
-                         always.split.variables = adjust.vars, status.variable.name = status.var, ...)
+                         status.variable.name = status.var, ...)
         stat.p["unweighted"]<-calculateError(rf.obj, data, response.var, prediction.type, test.type, w)$stat
       }else if(method=="weighted"){
-        data <- data.frame(cum.mat, meta.perm[, c(response.var, adjust.vars), drop = FALSE])
+        data <- data.frame(cum.mat, meta.perm[, c(response.var), drop = FALSE])
         feature.sel <- colnames(data)
-        rf.obj <- ranger(dependent.variable.name = response.var, data = data[, feature.sel, drop = FALSE], 
+        rf.obj <- ranger(dependent.variable.name = response.var, data = data[, feature.sel, drop = FALSE],
                          importance = 'none',  probability = probability,
-                         always.split.variables = adjust.vars, status.variable.name = status.var, ...)		
+                         status.variable.name = status.var, ...)
         stat.p<-calculateError(rf.obj, data, response.var, prediction.type, test.type, w)$stat
         names(stat.p)<-"weighted"
-      }else if(method=="unweighted"){		
-        data <- data.frame(cum.mat.pa, meta.perm[, c(response.var, adjust.vars), drop = FALSE])
+      }else if(method=="unweighted"){
+        data <- data.frame(cum.mat.pa, meta.perm[, c(response.var), drop = FALSE])
         feature.sel <- colnames(data)
-        rf.obj <- ranger(dependent.variable.name = response.var, data = data[, feature.sel, drop = FALSE], 
+        rf.obj <- ranger(dependent.variable.name = response.var, data = data[, feature.sel, drop = FALSE],
                          importance = 'none',  probability = probability,
-                         always.split.variables = adjust.vars, status.variable.name = status.var, ...)
+                         status.variable.name = status.var, ...)
         stat.p<-calculateError(rf.obj, data, response.var, prediction.type, test.type, w)$stat
         names(stat.p)<-"unweighted"
       }
